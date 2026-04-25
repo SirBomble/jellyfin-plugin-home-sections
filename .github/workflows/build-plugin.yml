@@ -1,0 +1,207 @@
+name: Build Jellyfin Plugin
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      deploy_pages:
+        description: "Deploy /jellyfin/plugins/ to GitHub Pages"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+env:
+  PROJECT_PATH: src/Jellyfin.Plugin.HomeScreenSections/Jellyfin.Plugin.HomeScreenSections.csproj
+  PLUGIN_ID: b8298e01-2697-407a-b44d-aa8dc795e850
+  PLUGIN_NAME: Home Screen Sections
+  PLUGIN_OWNER: IAmParadox27
+  PLUGIN_CATEGORY: General
+  PLUGIN_OVERVIEW: Modular home screen sections for Jellyfin
+  PLUGIN_DESCRIPTION: Adds configurable custom home screen sections to Jellyfin.
+  PUBLIC_PLUGIN_BASE_URL: https://www.iamparadox.dev/jellyfin/plugins
+
+jobs:
+  build:
+    name: Build Jellyfin ${{ matrix.jellyfin_version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        jellyfin_version:
+          - 10.10.7
+          - 10.11.8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDKs
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+
+      - name: Read plugin version
+        id: version
+        shell: bash
+        run: |
+          version="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' "$PROJECT_PATH" | head -n 1)"
+          if [ -z "$version" ]; then
+            echo "Could not read <Version> from $PROJECT_PATH" >&2
+            exit 1
+          fi
+
+          echo "plugin_version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        shell: bash
+        run: |
+          dotnet build "$PROJECT_PATH" \
+            --configuration Release \
+            -p:JellyfinVersion=${{ matrix.jellyfin_version }}
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          target_framework="net8.0"
+          if [[ "${{ matrix.jellyfin_version }}" == 10.11* ]]; then
+            target_framework="net9.0"
+          fi
+
+          plugin_version="${{ steps.version.outputs.plugin_version }}"
+          package_name="HomeScreenSections_${plugin_version}_Jellyfin_${{ matrix.jellyfin_version }}.zip"
+          output_dir="src/Jellyfin.Plugin.HomeScreenSections/bin/Release/${target_framework}"
+          package_dir="artifacts/packages"
+
+          mkdir -p "$package_dir"
+          if [ ! -d "$output_dir" ]; then
+            echo "Build output directory missing: $output_dir" >&2
+            exit 1
+          fi
+
+          (
+            cd "$output_dir"
+            zip -r "$GITHUB_WORKSPACE/$package_dir/$package_name" . -x "*.pdb"
+          )
+
+          checksum="$(md5sum "$package_dir/$package_name" | awk '{print $1}')"
+          timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          target_abi="${{ matrix.jellyfin_version }}.0"
+
+          cat > "artifacts/${{ matrix.jellyfin_version }}.json" <<EOF
+          {
+            "version": "$plugin_version",
+            "changelog": "Build for Jellyfin ${{ matrix.jellyfin_version }}.",
+            "targetAbi": "$target_abi",
+            "sourceUrl": "$PUBLIC_PLUGIN_BASE_URL/packages/$package_name",
+            "checksum": "$checksum",
+            "timestamp": "$timestamp",
+            "package": "$package_name"
+          }
+          EOF
+
+          echo "package_name=$package_name" >> "$GITHUB_OUTPUT"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-${{ matrix.jellyfin_version }}
+          path: |
+            artifacts/packages/*.zip
+            artifacts/${{ matrix.jellyfin_version }}.json
+
+  manifest:
+    name: Create Jellyfin manifest
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded
+          merge-multiple: true
+
+      - name: Generate manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p public/jellyfin/plugins/packages
+          cp downloaded/packages/*.zip public/jellyfin/plugins/packages/
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          metadata_files = sorted(Path("downloaded").glob("*.json"))
+          versions = []
+          for metadata_file in metadata_files:
+              version_data = json.loads(metadata_file.read_text())
+              version_data.pop("package", None)
+              versions.append(version_data)
+
+          versions.sort(key=lambda item: item["targetAbi"], reverse=True)
+
+          manifest = [
+              {
+                  "category": "General",
+                  "guid": "b8298e01-2697-407a-b44d-aa8dc795e850",
+                  "name": "Home Screen Sections",
+                  "description": "Adds configurable custom home screen sections to Jellyfin.",
+                  "owner": "IAmParadox27",
+                  "overview": "Modular home screen sections for Jellyfin",
+                  "versions": versions,
+              }
+          ]
+
+          output = Path("public/jellyfin/plugins/manifest.json")
+          output.write_text(json.dumps(manifest, indent=2) + "\n")
+          PY
+
+      - name: Upload manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jellyfin-plugin-repository
+          path: public/jellyfin/plugins
+
+      - name: Configure Pages
+        if: ${{ github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.deploy_pages) }}
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        if: ${{ github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.deploy_pages) }}
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy-pages:
+    name: Deploy plugin repository
+    runs-on: ubuntu-latest
+    needs: manifest
+    if: ${{ github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.deploy_pages) }}
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
