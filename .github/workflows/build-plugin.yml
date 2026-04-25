@@ -26,11 +26,11 @@ env:
   PROJECT_PATH: src/Jellyfin.Plugin.HomeScreenSections/Jellyfin.Plugin.HomeScreenSections.csproj
   PLUGIN_ID: b8298e01-2697-407a-b44d-aa8dc795e850
   PLUGIN_NAME: Home Screen Sections
-  PLUGIN_OWNER: IAmParadox27
+  PLUGIN_OWNER: SirBomble
   PLUGIN_CATEGORY: General
   PLUGIN_OVERVIEW: Modular home screen sections for Jellyfin
   PLUGIN_DESCRIPTION: Adds configurable custom home screen sections to Jellyfin.
-  PUBLIC_PLUGIN_BASE_URL: https://www.iamparadox.dev/jellyfin/plugins
+  PUBLIC_PLUGIN_BASE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/jellyfin/plugins
 
 jobs:
   build:
@@ -148,12 +148,16 @@ jobs:
 
           python3 - <<'PY'
           import json
+          import os
           from pathlib import Path
 
           metadata_files = sorted(Path("downloaded").glob("*.json"))
           versions = []
           for metadata_file in metadata_files:
               version_data = json.loads(metadata_file.read_text())
+              if isinstance(version_data, list):
+                  continue
+
               version_data.pop("package", None)
               versions.append(version_data)
 
@@ -161,12 +165,12 @@ jobs:
 
           manifest = [
               {
-                  "category": "General",
-                  "guid": "b8298e01-2697-407a-b44d-aa8dc795e850",
-                  "name": "Home Screen Sections",
-                  "description": "Adds configurable custom home screen sections to Jellyfin.",
-                  "owner": "IAmParadox27",
-                  "overview": "Modular home screen sections for Jellyfin",
+                  "category": os.environ["PLUGIN_CATEGORY"],
+                  "guid": os.environ["PLUGIN_ID"],
+                  "name": os.environ["PLUGIN_NAME"],
+                  "description": os.environ["PLUGIN_DESCRIPTION"],
+                  "owner": os.environ["PLUGIN_OWNER"],
+                  "overview": os.environ["PLUGIN_OVERVIEW"],
                   "versions": versions,
               }
           ]
